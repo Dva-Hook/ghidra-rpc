@@ -434,6 +434,24 @@ class GuiContext:
         logger.info("GUI context ready")
 
     @staticmethod
+    def _normalize_project_location(loc_str: str) -> str:
+        """Strip the URL-style leading slash Ghidra puts before a Windows drive letter.
+
+        ``ProjectLocator.getLocation()`` returns a URL-derived path string, which
+        on Windows looks like ``/C:/test/`` rather than ``C:/test/`` (the same
+        convention as ``file:///C:/test/``'s path component). ``pathlib`` does
+        not know this convention: ``Path("/C:/test/").resolve()`` parses it as
+        *drive-relative* (``WindowsPath('C:test')``, no root) rather than
+        absolute, so it can never equal an expected absolute path — meaning the
+        comparison in ``_project_matches`` was unconditionally False on Windows,
+        for every project, every time. Verified empirically on a real Windows
+        VM. No-op on POSIX, where locations never start with ``/<letter>:``.
+        """
+        if len(loc_str) >= 3 and loc_str[0] in "/\\" and loc_str[2] == ":" and loc_str[1].isalpha():
+            return loc_str[1:]
+        return loc_str
+
+    @staticmethod
     def _project_matches(project, session: "Session") -> bool:
         """Return True if *project* is the Ghidra project described by session.project_gpr.
 
@@ -444,12 +462,16 @@ class GuiContext:
         - ``ProjectLocator.getLocation()`` returns the raw location string stored in
           the locator, which ``GhidraURL.checkLocalAbsolutePath`` normalises with a
           trailing ``/`` (e.g. ``/path/projA/``).  Wrap in ``Path.resolve()`` to
-          strip the trailing slash before comparing.
+          strip the trailing slash before comparing.  On Windows it also carries
+          a leading slash before the drive letter (``/C:/test/``) that must be
+          stripped first — see ``_normalize_project_location``.
         """
         try:
             locator = project.getProjectLocator()
-            # getLocation() → e.g. "/tmp/ghidra-multi-test/projA/"
-            actual_dir = Path(str(locator.getLocation())).resolve()
+            # getLocation() → e.g. "/tmp/ghidra-multi-test/projA/" (POSIX) or
+            # "/C:/test/" (Windows).
+            loc_str = GuiContext._normalize_project_location(str(locator.getLocation()))
+            actual_dir = Path(loc_str).resolve()
             expected_dir = session.project_gpr.parent.resolve()
             actual_name = str(locator.getName())
             expected_name = session.project_gpr.stem

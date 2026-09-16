@@ -4,39 +4,24 @@
 
 ### Added
 
-- **Windows support (headless mode only).** The daemon and CLI now run on
-  Windows. `ghidra_rpc/transport.py` abstracts the IPC transport: Linux and
-  macOS keep the Unix domain socket unchanged, while Windows — where CPython
-  exposes no `AF_UNIX` — uses a TCP listener bound to `127.0.0.1` on an
-  OS-assigned port. Because a loopback port is reachable by any local process,
-  the daemon generates a 256-bit token at startup and rejects every request
-  that does not present it (`Unauthorized`). The port and token are published
-  in a per-user endpoint descriptor at
-  `%LOCALAPPDATA%\ghidra-rpc\ghidra-rpc-<hash>.sock`, and the listener claims
-  its port with `SO_EXCLUSIVEADDRUSE`. The session registry gets a real
-  `msvcrt` file lock rather than degrading to unlocked writes, and
-  `--detach` uses `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP |
-  CREATE_BREAKAWAY_FROM_JOB` since `start_new_session` is a no-op on Windows.
-  `CREATE_BREAKAWAY_FROM_JOB` is required, not optional: a launcher that puts
-  its children in a Job Object (OpenSSH's `sshd` does) kills every process
-  still in that job when it closes, and `DETACHED_PROCESS` alone does not
-  remove a child from its parent's job — verified on a real Windows VM, where
-  a detached daemon vanished within ~1s of the launching ssh session closing
-  until this flag was added. The newline-delimited JSON wire
-  format and every CLI command are unchanged on all platforms.
-
-  **GUI mode is not supported on Windows.** `launcher.py` /
-  `_gui_launcher.py` are untouched by this work and unverified there; use
-  `--headless`. Headless Windows is covered by CI: the unit suite runs on
-  every push and pull request, and the Ghidra integration suite — 112 tests
-  against real headless Ghidra 12.1.3 — runs on demand via the `integration`
-  workflow.
-
-- **Cross-platform CI** (`.github/workflows/`). `tests.yml` runs the unit
-  suite on Ubuntu and Windows across Python 3.11–3.13 plus an install
-  smoke-test, on every push and pull request. `integration.yml` runs the
-  Ghidra integration suite on demand. The matrix covers Ubuntu, macOS and
-  Windows.
+- **Full Windows support: headless and GUI mode.**
+  - **Transport**: `ghidra_rpc/transport.py` abstracts the IPC layer.
+    Windows (no `AF_UNIX`) uses a token-authenticated TCP listener on
+    `127.0.0.1` instead of a Unix domain socket; port/token live in
+    `%LOCALAPPDATA%\ghidra-rpc\ghidra-rpc-<hash>.sock`. Wire format and CLI
+    are unchanged on all platforms.
+  - **`--detach`**: uses `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP |
+    CREATE_BREAKAWAY_FROM_JOB` on Windows (`start_new_session` is a no-op
+    there). `CREATE_BREAKAWAY_FROM_JOB` is required for the daemon to
+    survive launchers that use Job Objects, e.g. OpenSSH's `sshd`.
+  - **GUI mode**: now works on Windows. Fixed
+    `GuiContext._normalize_project_location()` to handle
+    `ProjectLocator.getLocation()`'s leading-slash-before-drive-letter form
+    (`/C:/test/`), which `pathlib` misparsed as a relative path, making the
+    daemon's project-open check always fail.
+  - **CI**: `tests.yml` (unit suite, Ubuntu/macOS/Windows) and
+    `integration.yml` (112-test Ghidra suite) cover headless Windows. GUI
+    mode has no CI coverage (no display in the runner).
 
 ### Changed
 
@@ -51,19 +36,13 @@
 
 ### Fixed
 
-- `--detach`'d daemons silently lost their persisted `ghidra_install_dir` a
-  moment after starting, on every platform, since the first public release.
-  The detached child process reconstructs its own `Session` from just the
-  `--mode`/`--project` argv it was launched with and re-saves it as part of
-  its own startup — clobbering the parent's correctly-persisted
-  `ghidra_install_dir` with `null`. This broke exactly the case the field
-  exists for: `send_request_with_auto_restart` restarting a dead daemon from
-  an environment (cron, sudo, a bare ssh call) that doesn't have
-  `GHIDRA_INSTALL_DIR` set. Fixed by threading it through explicitly as
-  `--ghidra-install-dir` to the child. Found while verifying the
-  "stale descriptor self-heals" behavior in `docs/troubleshooting.md` on
-  Windows — it never actually worked once the ambient environment lacked
-  `GHIDRA_INSTALL_DIR`.
+- `--detach`'d daemons lost their persisted `ghidra_install_dir` moments
+  after starting, on every platform: the detached child re-saves its own
+  `Session` from bare `--mode`/`--project` argv, clobbering the parent's
+  value with `null`. This broke `send_request_with_auto_restart` healing a
+  dead daemon from an environment without `GHIDRA_INSTALL_DIR` set (cron,
+  sudo, a bare ssh call). Fixed by passing `--ghidra-install-dir` to the
+  child too.
 
 - Tests: socket-binding tests now use a short temp directory. macOS caps
   `AF_UNIX` `sun_path` at 104 bytes (Linux allows 108) and pytest's `tmp_path`

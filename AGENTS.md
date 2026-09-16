@@ -129,6 +129,9 @@ ghidra-rpc/
     ├── test_search_decompiled.py — search_decompiled handler logic (regex matching,
     │                              class_filter, limit/max_functions truncation) against
     │                              a fully mocked program; no Ghidra needed
+    ├── test_gui_context.py      — GuiContext._project_matches / _normalize_project_location
+    │                              against a fake ProjectLocator (no Ghidra needed); regression
+    │                              coverage for the Windows drive-letter path bug (gotcha 12)
     ├── test_integration.py      — End-to-end integration tests against a real headless
     │                              Ghidra daemon loading tests/fixtures/testapp, covering
     │                              every API domain.  Skipped unless GHIDRA_INSTALL_DIR is
@@ -236,7 +239,7 @@ uv venv && uv pip install -e .
 ### Running Tests (no Ghidra needed)
 ```bash
 python -m pytest tests/test_protocol.py tests/test_client.py tests/test_session_registry.py \
-  tests/test_cli.py tests/test_search_decompiled.py -v
+  tests/test_cli.py tests/test_search_decompiled.py tests/test_gui_context.py -v
 ```
 
 ### Running Integration Tests (requires Ghidra)
@@ -330,6 +333,32 @@ uv run ghidra-rpc decompile ls main
     threading it through as `--ghidra-install-dir` — but the general trap
     (child re-save silently drops anything not in its own argv) applies to
     any future field added to `Session`.
+
+12. **`ProjectLocator.getLocation()` is URL-derived and Windows-hostile**:
+    it returns a Windows drive path with a leading slash (`/C:/test/`, the
+    `file:///C:/test/` convention), and `pathlib` silently misparses that as
+    *drive-relative* (`Path("/C:/test/").resolve()` → `WindowsPath('C:test')`,
+    no root) rather than absolute. This made `GuiContext._project_matches()`
+    unconditionally `False` on Windows — `_wait_for_project()` always ran out
+    its full 240 s and raised, even when Ghidra had opened the exact right
+    project within seconds, confirmed by watching a real GUI session open
+    normally while `status` still reported `running: false`. GUI mode was
+    listed as merely "unverified" on Windows; it was actually broken outright,
+    every time. Fixed by `GuiContext._normalize_project_location()`, which
+    strips the leading slash before comparing (see `docs/internals.md`).
+
+13. **A crashed GUI daemon can leave an orphaned process holding the project
+    lock** — if `create_gui_context()` raises after Ghidra's JVM has already
+    created Swing windows (e.g. the timeout in gotcha 12, or a genuine project
+    lock conflict), the Python process can exit its own main thread while a
+    non-daemon Java/Swing thread keeps the OS process (and its window) alive
+    indefinitely, invisible to the user's shell (the command "returns" with a
+    traceback, but `tasklist` still shows the process). A second `start`
+    attempt against the same project then hits a real lock held by that
+    zombie and times out for a *different* reason than whatever killed the
+    first attempt. Diagnose with `tasklist /FI "IMAGENAME eq python.exe"` and
+    `taskkill /F /PID <pid>` before assuming a fresh retry will behave any
+    differently.
 
 > For more detail on all gotchas plus the Ghidra API reference and session/daemon
 > internals, read **`docs/internals.md`**.

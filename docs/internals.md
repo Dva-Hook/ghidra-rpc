@@ -59,6 +59,30 @@ endpoint). On Unix, inspect it with:
 tail -50 /tmp/ghidra-rpc-*.log
 ```
 
+## GUI Mode Project Matching
+
+`GuiContext._wait_for_project()` polls `AppInfo.getActiveProject()` (0.5 s interval,
+240 s timeout) until it returns a project matching the one requested, since
+`GuiRpcLauncher._launch()` opens Ghidra's GUI in a background Java thread with no
+other synchronous signal that the project actually opened. `_project_matches()`
+identifies a match by comparing `ProjectLocator.getLocation()` (the containing
+directory) and `.getName()` (the project name) against `session.project_gpr`.
+
+**Windows-only bug, fixed**: `ProjectLocator.getLocation()` is URL-derived and on
+Windows returns a leading slash before the drive letter, e.g. `/C:/test/` (the
+same convention as `file:///C:/test/`'s path component). `pathlib` does not know
+this convention — `Path("/C:/test/").resolve()` parses it as *drive-relative*
+(`WindowsPath('C:test')`, no root) rather than absolute, so it can never equal an
+expected absolute path. This made `_project_matches()` unconditionally `False` on
+Windows, for every project, forever: `_wait_for_project()` always ran out its full
+240 s and raised, even when Ghidra had opened the exact right project seconds
+after starting — confirmed by watching a real Windows GUI session open normally
+while the daemon's own `status` still reported `running: false`.
+`GuiContext._normalize_project_location()` strips that leading slash before the
+comparison (no-op on POSIX, where a location never starts with `/<letter>:`).
+Covered by `tests/test_gui_context.py` (pure Python, no Ghidra needed — a fake
+locator stands in for the real `ProjectLocator`).
+
 ## Local Transport
 
 Linux and macOS use the original Unix domain socket transport. Windows Python

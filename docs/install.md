@@ -39,11 +39,18 @@ The same `uv tool install` command works on Windows with a Windows path.
 ## Windows Notes
 
 Prerequisites are the same as on Unix: Ghidra 11+, Python 3.11+, Java 17+, uv.
-Two things differ.
+A few things differ.
 
-**Headless only.** Run the daemon with `--headless`. GUI mode has not been
-verified on Windows and the `goto` command, which is GUI-only, is unavailable
-there in practice.
+**GUI mode works, including `goto`** — verified end-to-end on a real Windows
+VM: `start` (no `--headless`), `load`, and `goto` all confirmed working
+against a live GUI session. It needed one fix first: Ghidra's
+`ProjectLocator.getLocation()` returns Windows paths with a leading slash
+before the drive letter (`/C:/test/`), which `pathlib` silently misparsed as
+a drive-relative path rather than an absolute one — so the daemon's own
+readiness check could never recognize the project as open, and every
+GUI-mode `start` timed out after 240s regardless of whether Ghidra had
+actually opened it correctly. See `docs/internals.md` for the fix
+(`GuiContext._normalize_project_location`).
 
 **Transport.** CPython on Windows exposes no `AF_UNIX`, so the daemon listens on
 a TCP socket bound to `127.0.0.1` instead of a socket file. A loopback port is
