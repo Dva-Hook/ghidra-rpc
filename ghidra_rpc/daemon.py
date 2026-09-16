@@ -87,28 +87,60 @@ def start_background(session: Session, timeout: float = 60.0) -> None:
         "--mode", session.mode,
         "--project", str(session.project_gpr),
     ]
+    # Thread ghidra_install_dir through explicitly: the child's own main()
+    # reconstructs a Session from just these argv flags and re-saves it via
+    # start_blocking(), which otherwise clobbers the correct value we just
+    # wrote above with None a moment later — silently breaking the "restart
+    # in an environment that strips GHIDRA_INSTALL_DIR" case this field
+    # exists for, on every platform, not just Windows.
+    if ghidra_dir:
+        cmd += ["--ghidra-install-dir", ghidra_dir]
     # Detach the child so it survives the parent's exit.  start_new_session
     # (setsid) is POSIX-only — CPython silently ignores it on Windows, which
     # left the daemon sharing the launching console and dying with it.  The
     # Windows equivalent is DETACHED_PROCESS (drop the console entirely) plus
     # CREATE_NEW_PROCESS_GROUP (so a Ctrl+C in the parent isn't broadcast to
     # it).  stdout/stderr still redirect to the log file either way.
+    #
+    # CREATE_BREAKAWAY_FROM_JOB is also required: OpenSSH's sshd puts every
+    # process it spawns in a Job Object, and closing that job (when the ssh
+    # session ends) kills every process still in it — DETACHED_PROCESS alone
+    # does not remove a child from its parent's job.  Verified empirically:
+    # without this flag the daemon vanished within ~1s of the launching ssh
+    # session closing, with no shutdown log entry.  A job can itself forbid
+    # breakaway (JOB_OBJECT_LIMIT_BREAKAWAY_OK unset), which makes CreateProcess
+    # fail outright rather than ignore the flag, so retry without it in that
+    # case instead of failing the start.
     detach_kwargs: dict = {}
     if sys.platform == "win32":
         detach_kwargs["creationflags"] = (
-            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.CREATE_BREAKAWAY_FROM_JOB
         )
     else:
         detach_kwargs["start_new_session"] = True
 
     with open(log_path, "a") as log_fh:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_fh,
-            stderr=log_fh,
-            env=env,
-            **detach_kwargs,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fh,
+                stderr=log_fh,
+                env=env,
+                **detach_kwargs,
+            )
+        except OSError:
+            if sys.platform != "win32" or "creationflags" not in detach_kwargs:
+                raise
+            detach_kwargs["creationflags"] &= ~subprocess.CREATE_BREAKAWAY_FROM_JOB
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fh,
+                stderr=log_fh,
+                env=env,
+                **detach_kwargs,
+            )
 
     # Wait for socket to appear and become responsive.
     # Also watch for the subprocess dying early (wrong Python, missing dep, etc.)
@@ -157,6 +189,7 @@ def main():
     parser = argparse.ArgumentParser(description="ghidra-rpc daemon")
     parser.add_argument("--mode", choices=["gui", "headless"], required=True)
     parser.add_argument("--project", type=Path, required=True)
+    parser.add_argument("--ghidra-install-dir", type=Path, default=None)
     args = parser.parse_args()
 
     from ghidra_rpc.session import Session, socket_path_for_project
@@ -165,6 +198,7 @@ def main():
         mode=args.mode,
         project_gpr=args.project,
         socket_path=socket_path_for_project(args.project),
+        ghidra_install_dir=args.ghidra_install_dir,
     )
 
     start_blocking(session)

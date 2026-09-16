@@ -21,14 +21,34 @@ from `session.ghidra_install_dir` → current `GHIDRA_INSTALL_DIR` → nothing, 
 order. This ensures the daemon child gets the right env var even when launched from
 cron/systemd/nohup contexts that strip non-standard env vars.
 
+**The session file gets written twice, by two different processes** — once by
+`start_background()` in the parent (CLI) process, and again moments later by the
+detached child's own `main()` → `start_blocking()`, which reconstructs a fresh
+`Session` from its own argv (`--mode`, `--project`, `--ghidra-install-dir`) and
+re-saves it as part of normal startup. If the child doesn't receive
+`--ghidra-install-dir` too, its re-save silently overwrites the parent's correct
+value with `null` — this was a real bug (fixed in `start_background()`'s subprocess
+`cmd` construction and `main()`'s argparse), not a hypothetical one. Anything that
+changes what the child process is launched with needs to keep this in mind.
+
 ## Background Start & Logs
 
 `start_background()` in `daemon.py`:
 1. Saves the session file.
-2. Spawns `python -m ghidra_rpc.daemon --mode … --project …` detached so the child
-   survives the parent's exit — `start_new_session=True` (setsid) on POSIX,
-   `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows, where
-   `start_new_session` is silently ignored.
+2. Spawns `python -m ghidra_rpc.daemon --mode … --project … [--ghidra-install-dir …]`
+   detached so the child survives the parent's exit — `start_new_session=True`
+   (setsid) on POSIX, `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP |
+   CREATE_BREAKAWAY_FROM_JOB` on Windows, where `start_new_session` is silently
+   ignored. The breakaway flag is not optional decoration: a launcher that puts its
+   children in a Job Object (OpenSSH's `sshd` does) kills every process still in
+   that job when the job closes, and neither `DETACHED_PROCESS` nor
+   `CREATE_NEW_PROCESS_GROUP` removes a child from its parent's job — only
+   `CREATE_BREAKAWAY_FROM_JOB` does. Verified on a real Windows VM: without it, a
+   detached daemon vanished within ~1s of the launching ssh session closing, no
+   shutdown log entry, nothing left in `tasklist`. A job can itself forbid
+   breakaway (`JOB_OBJECT_LIMIT_BREAKAWAY_OK` unset), which makes `CreateProcess`
+   fail outright rather than silently ignore the flag, so `start_background()`
+   retries once without it in that case rather than failing the start.
 3. Polls the local endpoint (0.5 s interval) until it's responsive or the timeout expires.
 4. On timeout the error message includes the log file path.
 

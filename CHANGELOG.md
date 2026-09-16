@@ -15,8 +15,14 @@
   `%LOCALAPPDATA%\ghidra-rpc\ghidra-rpc-<hash>.sock`, and the listener claims
   its port with `SO_EXCLUSIVEADDRUSE`. The session registry gets a real
   `msvcrt` file lock rather than degrading to unlocked writes, and
-  `--detach` uses `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` since
-  `start_new_session` is a no-op on Windows. The newline-delimited JSON wire
+  `--detach` uses `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP |
+  CREATE_BREAKAWAY_FROM_JOB` since `start_new_session` is a no-op on Windows.
+  `CREATE_BREAKAWAY_FROM_JOB` is required, not optional: a launcher that puts
+  its children in a Job Object (OpenSSH's `sshd` does) kills every process
+  still in that job when it closes, and `DETACHED_PROCESS` alone does not
+  remove a child from its parent's job — verified on a real Windows VM, where
+  a detached daemon vanished within ~1s of the launching ssh session closing
+  until this flag was added. The newline-delimited JSON wire
   format and every CLI command are unchanged on all platforms.
 
   **GUI mode is not supported on Windows.** `launcher.py` /
@@ -44,6 +50,20 @@
   `{address, count, listing}`; add `--with-instructions` for the previous shape.
 
 ### Fixed
+
+- `--detach`'d daemons silently lost their persisted `ghidra_install_dir` a
+  moment after starting, on every platform, since the first public release.
+  The detached child process reconstructs its own `Session` from just the
+  `--mode`/`--project` argv it was launched with and re-saves it as part of
+  its own startup — clobbering the parent's correctly-persisted
+  `ghidra_install_dir` with `null`. This broke exactly the case the field
+  exists for: `send_request_with_auto_restart` restarting a dead daemon from
+  an environment (cron, sudo, a bare ssh call) that doesn't have
+  `GHIDRA_INSTALL_DIR` set. Fixed by threading it through explicitly as
+  `--ghidra-install-dir` to the child. Found while verifying the
+  "stale descriptor self-heals" behavior in `docs/troubleshooting.md` on
+  Windows — it never actually worked once the ambient environment lacked
+  `GHIDRA_INSTALL_DIR`.
 
 - Tests: socket-binding tests now use a short temp directory. macOS caps
   `AF_UNIX` `sun_path` at 104 bytes (Linux allows 108) and pytest's `tmp_path`

@@ -305,5 +305,31 @@ uv run ghidra-rpc decompile ls main
    sockets are created in, or the discovery tests glob an empty directory and
    pass vacuously (see gotcha 7).
 
+10. **`DETACHED_PROCESS` alone does not survive a Job Object on Windows**:
+    a launcher that puts its children in a Job Object (OpenSSH's `sshd` does)
+    kills every process still in that job when the job closes, and neither
+    `DETACHED_PROCESS` nor `CREATE_NEW_PROCESS_GROUP` removes a child from its
+    parent's job — only `CREATE_BREAKAWAY_FROM_JOB` does. Without it, a
+    `--detach`'d daemon vanished within ~1s of the launching ssh session
+    closing, with no shutdown log entry — verified on a real Windows VM, not
+    inferred. A job can itself forbid breakaway
+    (`JOB_OBJECT_LIMIT_BREAKAWAY_OK` unset), which makes `CreateProcess` fail
+    outright rather than ignore the flag, so `start_background()` retries once
+    without it rather than failing the start.
+
+11. **The detached child re-saves its own session from bare argv** — `main()`
+    in `daemon.py` reconstructs a fresh `Session` from just `--mode`/
+    `--project` and `start_blocking()` saves it again as part of normal
+    startup, moments after the parent's `start_background()` already saved
+    the correct one. Any field the parent resolved (currently
+    `ghidra_install_dir`) that isn't also passed through as an argv flag gets
+    silently clobbered back to its default by this second save. This bit us
+    for real: `ghidra_install_dir` persistence was broken this way since the
+    first public release, on every platform, defeating the exact
+    auto-restart-from-a-stripped-environment case it exists for. Fixed by
+    threading it through as `--ghidra-install-dir` — but the general trap
+    (child re-save silently drops anything not in its own argv) applies to
+    any future field added to `Session`.
+
 > For more detail on all gotchas plus the Ghidra API reference and session/daemon
 > internals, read **`docs/internals.md`**.
